@@ -189,6 +189,15 @@ def run_transcription(job_id: str, input_path: str, model_size: str = "medium") 
 
 
 # ── STEP 2: 英語→日本語 翻訳 ────────────────────────────────────────
+# 日本語TTS の目安速度（mora/秒）。この値から最大文字数を推定する
+_JA_MORA_PER_SEC = 6.5
+
+
+def _estimate_max_chars(duration_sec: float) -> int:
+    """セグメント尺から収まる日本語の最大文字数を推定する。"""
+    return max(10, int(duration_sec * _JA_MORA_PER_SEC))
+
+
 def translate_text_google(text: str) -> str:
     try:
         return GoogleTranslator(source="en", target="ja").translate(text)
@@ -197,8 +206,12 @@ def translate_text_google(text: str) -> str:
         return text
 
 
-def translate_text_claude(text: str, client) -> str:
-    """Claude API を使って英語→日本語翻訳（文脈を考慮した高品質訳）。"""
+def translate_text_claude(text: str, duration_sec: float, client) -> str:
+    """
+    尺に収まる日本語に翻訳する（吹き替え翻訳）。
+    duration_sec を渡すことで、その秒数で読み切れる長さに自動調整する。
+    """
+    max_chars = _estimate_max_chars(duration_sec)
     try:
         response = client.messages.create(
             model="claude-opus-4-5",
@@ -206,11 +219,14 @@ def translate_text_claude(text: str, client) -> str:
             messages=[{
                 "role": "user",
                 "content": (
-                    "以下の英語テキストを日本語に翻訳してください。\n"
-                    "・吹き替え音声として使用するため、自然な話し言葉調で訳してください\n"
-                    "・原文のニュアンスと口調（カジュアル/フォーマル）を保つこと\n"
-                    "・翻訳結果のみを出力し、説明は不要です\n\n"
-                    f"{text}"
+                    f"以下の英語テキストを日本語の吹き替え音声用に翻訳してください。\n\n"
+                    f"【重要な制約】\n"
+                    f"・この音声は {duration_sec:.1f} 秒のセグメントに収める必要があります\n"
+                    f"・日本語は {max_chars} 文字以内に収めてください\n"
+                    f"・意味を保ちながら簡潔に訳すこと（省略・言い換えOK）\n"
+                    f"・自然な話し言葉調にすること\n"
+                    f"・翻訳結果のみ出力、説明不要\n\n"
+                    f"英語原文:\n{text}"
                 ),
             }],
         )
@@ -231,21 +247,23 @@ def translate_segments(job_id: str, segments: list[dict]) -> list[dict]:
     if use_claude:
         import anthropic
         claude_client = anthropic.Anthropic(api_key=api_key)
-        print(f"[{job_id}] 翻訳バックエンド: Claude API")
+        print(f"[{job_id}] 翻訳バックエンド: Claude API（尺制約付き吹き替え翻訳）")
     else:
-        print(f"[{job_id}] 翻訳バックエンド: Google翻訳（deep-translator）")
+        print(f"[{job_id}] 翻訳バックエンド: Google翻訳（速度調整で同期）")
 
     ja_segments = []
     total = len(segments)
 
     for i, seg in enumerate(segments):
         en_text = seg["text"].strip()
+        duration_sec = seg["end"] - seg["start"]
+
         if not en_text:
             ja_segments.append({**seg, "text": ""})
             continue
 
         if use_claude:
-            ja_text = translate_text_claude(en_text, claude_client)
+            ja_text = translate_text_claude(en_text, duration_sec, claude_client)
         else:
             ja_text = translate_text_google(en_text)
 
@@ -433,14 +451,14 @@ def run_pipeline(job_id: str, voice_key: str = "female", make_subtitle: bool = T
             # 出力トラックは動画より少し長めに確保
             track = AudioSegment.silent(duration=int(total_duration * 1000) + 3000)
 
-            last_end_ms = 0  # 前セグメントの音声終端（衝突防止用）
-
             for i, seg in enumerate(ja_segments):
                 text = seg.get("text", "").strip()
                 if not text:
                     continue
 
-                seg_start_ms = int(seg["start"] * 1000)
+                start_ms = int(seg["start"] * 1000)
+                end_ms   = int(seg["end"]   * 1000)
+                seg_dur  = end_ms - start_ms
 
                 tts_path = os.path.join(tmpdir, f"seg_{i:04d}.mp3")
                 try:
@@ -451,18 +469,27 @@ def run_pipeline(job_id: str, voice_key: str = "female", make_subtitle: bool = T
 
                 tts_audio = AudioSegment.from_mp3(tts_path)
 
-                # ── スマート配置 ────────────────────────────────────────
-                # 原則: 元の開始時刻に配置
-                # 例外: 前の音声がまだ終わっていない場合は、終端+間隔の後に配置
-                # → 音声同士の衝突を根本的に防ぐ
-                if seg_start_ms >= last_end_ms + MIN_GAP_MS:
-                    actual_start_ms = seg_start_ms  # 元の位置に配置できる
-                else:
-                    actual_start_ms = last_end_ms + MIN_GAP_MS  # 後ろにずらす
-                    print(f"[seg {i}] 衝突回避: {seg_start_ms}ms → {actual_start_ms}ms にずらし")
+                # ── 尺合わせ ────────────────────────────────────────────
+                # Claude翻訳の場合: 尺内に収まる翻訳になっているはずなので
+                #   微調整（～1.2倍）のみ
+                # Google翻訳の場合: 尺超えが起きやすいので1.35倍まで圧縮
+                use_claude = os.environ.get("TRANSLATION_BACKEND", "google") == "claude" \
+                             and os.environ.get("ANTHROPIC_API_KEY", "")
+                max_speed  = 1.2 if use_claude else 1.35
 
-                track = track.overlay(tts_audio, position=actual_start_ms)
-                last_end_ms = actual_start_ms + len(tts_audio)
+                tts_ms = len(tts_audio)
+                if seg_dur > 0 and tts_ms > seg_dur:
+                    speed = tts_ms / seg_dur
+                    if speed <= max_speed:
+                        # 許容範囲内 → 速度調整して尺に収める
+                        tts_audio = adjust_speed(tts_audio, seg_dur)
+                        print(f"[seg {i}] 速度調整 {speed:.2f}x")
+                    else:
+                        # 超過しすぎ → 速度調整はせず元の速度で流す（尺内翻訳が機能していれば滅多に起きない）
+                        print(f"[seg {i}] 速度 {speed:.2f}x > 上限{max_speed}x → そのまま流す")
+
+                # 元の開始位置に配置（スライドと同期を保つ）
+                track = track.overlay(tts_audio, position=start_ms)
 
                 update_status(
                     job_id, "processing",
