@@ -23,11 +23,24 @@ from pydub import AudioSegment
 
 JOBS_DIR = Path("jobs")
 
-# ── 日本語 TTS 音声 ──────────────────────────────────────────────────
-VOICES = {
-    "female":  "ja-JP-NanamiNeural",   # 女性（標準・明瞭）
-    "male":    "ja-JP-KeitaNeural",    # 男性（標準）
+# ── TTS バックエンド設定 ─────────────────────────────────────────────
+# TTS_BACKEND=edge    : edge-tts（デフォルト・ネット必要）
+# TTS_BACKEND=voicevox: VOICEVOX（ローカル・高品質・要VOICEVOX起動）
+TTS_BACKEND = os.environ.get("TTS_BACKEND", "edge").lower()
+
+# edge-tts 音声
+EDGE_VOICES = {
+    "female": "ja-JP-NanamiNeural",
+    "male":   "ja-JP-KeitaNeural",
 }
+
+# VOICEVOX スピーカーID
+# https://voicevox.hiroshiba.jp/ でキャラ一覧確認
+VOICEVOX_SPEAKERS = {
+    "female": 3,   # ずんだもん（ノーマル）
+    "male":   2,   # 四国めたん（ノーマル）
+}
+VOICEVOX_URL = os.environ.get("VOICEVOX_URL", "http://localhost:50021")
 
 
 # ── ステータス管理 ────────────────────────────────────────────────────
@@ -245,20 +258,66 @@ def translate_segments(job_id: str, segments: list[dict]) -> list[dict]:
     return ja_segments
 
 
-# ── STEP 3: 日本語 TTS ───────────────────────────────────────────────
-async def _tts_async(text: str, output_path: str, voice: str) -> None:
+# ── STEP 3: TTS（edge-tts） ──────────────────────────────────────────
+async def _edge_tts_async(text: str, output_path: str, voice: str) -> None:
     await edge_tts.Communicate(text, voice).save(output_path)
 
 
-def tts_segment_sync(text: str, output_path: str, voice: str) -> None:
+def _tts_edge(text: str, output_path: str, voice_key: str) -> None:
+    voice = EDGE_VOICES.get(voice_key, EDGE_VOICES["female"])
     loop = asyncio.new_event_loop()
     try:
-        loop.run_until_complete(_tts_async(text, output_path, voice))
+        loop.run_until_complete(_edge_tts_async(text, output_path, voice))
     finally:
         loop.close()
 
 
-# ── 音声速度調整（TTS がセグメント尺を超えた場合に圧縮） ─────────────
+# ── STEP 3: TTS（VOICEVOX） ──────────────────────────────────────────
+def _tts_voicevox(text: str, output_path: str, voice_key: str) -> None:
+    import urllib.request, urllib.parse
+    speaker_id = VOICEVOX_SPEAKERS.get(voice_key, VOICEVOX_SPEAKERS["female"])
+
+    # audio_query
+    query_url = f"{VOICEVOX_URL}/audio_query?text={urllib.parse.quote(text)}&speaker={speaker_id}"
+    req = urllib.request.Request(query_url, method="POST")
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        query = json.loads(resp.read())
+
+    # speedScale を少し上げて自然なテンポに（デフォルト1.0）
+    query["speedScale"] = float(os.environ.get("VOICEVOX_SPEED", "1.1"))
+    query["intonationScale"] = 1.1  # 抑揚を少し強調
+
+    # synthesis
+    body = json.dumps(query).encode()
+    synth_url = f"{VOICEVOX_URL}/synthesis?speaker={speaker_id}"
+    req2 = urllib.request.Request(synth_url, data=body, method="POST",
+                                   headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req2, timeout=60) as resp:
+        wav_data = resp.read()
+
+    with open(output_path, "wb") as f:
+        f.write(wav_data)
+
+
+def tts_segment_sync(text: str, output_path: str, voice_key: str) -> None:
+    """バックエンドに応じてTTSを呼び分ける。"""
+    if TTS_BACKEND == "voicevox":
+        # VOICEVOXはWAV出力なので拡張子をwavに変える
+        wav_path = output_path.replace(".mp3", ".wav")
+        _tts_voicevox(text, wav_path, voice_key)
+        # pydubで読めるようにmp3に変換
+        AudioSegment.from_wav(wav_path).export(output_path, format="mp3")
+        os.unlink(wav_path)
+    else:
+        _tts_edge(text, output_path, voice_key)
+
+
+# ── 音声速度調整 ──────────────────────────────────────────────────────
+# 方針: 最大1.4倍速までしか圧縮しない。それ以上伸びる場合はそのまま流す
+# （無理に圧縮するより、少し重なる方が自然に聞こえる）
+_MAX_SPEED = 1.4
+
+
 def _build_atempo(speed: float) -> str:
     parts: list[str] = []
     r = speed
@@ -277,10 +336,15 @@ def adjust_speed(audio: AudioSegment, target_ms: float) -> AudioSegment:
     if current_ms == 0 or target_ms <= 0:
         return audio
 
-    # 日本語は英語より音節が多く話速調整が必要になりやすい
-    # 最大3.5倍速まで許容（それ以上は品質劣化が大きい）
-    speed = max(0.5, min(3.5, current_ms / target_ms))
-    if abs(speed - 1.0) < 0.05:
+    speed = current_ms / target_ms
+
+    # 上限を1.4倍に設定。それ以上必要な場合は調整しない（流す）
+    if speed > _MAX_SPEED:
+        print(f"[速度調整スキップ] 必要速度 {speed:.2f}x > 上限 {_MAX_SPEED}x → そのまま流す")
+        return audio
+
+    # 1.05倍以内なら調整不要
+    if speed < 1.05:
         return audio
 
     with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
@@ -326,7 +390,7 @@ def generate_srt(segments: list[dict], output_path: str) -> None:
 def run_pipeline(job_id: str, voice_key: str = "female", make_subtitle: bool = True) -> None:
     try:
         job_dir = JOBS_DIR / job_id
-        voice   = VOICES.get(voice_key, VOICES["female"])
+        voice   = voice_key  # tts_segment_sync に voice_key をそのまま渡す
 
         # 編集済み JSON を優先
         edited   = job_dir / "segments_ja_edited.json"
@@ -358,7 +422,8 @@ def run_pipeline(job_id: str, voice_key: str = "female", make_subtitle: bool = T
             generate_srt(ja_segments, str(job_dir / "subtitle.srt"))
 
         # ── TTS ＋ タイムライン構築 ─────────────────────────────────
-        update_status(job_id, "processing", 5, f"日本語音声を生成中（声: {voice_key}）...")
+        backend_label = f"VOICEVOX" if TTS_BACKEND == "voicevox" else "edge-tts"
+        update_status(job_id, "processing", 5, f"日本語音声を生成中（{backend_label} / {voice_key}）...")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             track = AudioSegment.silent(duration=int(total_duration * 1000) + 500)
@@ -374,7 +439,7 @@ def run_pipeline(job_id: str, voice_key: str = "female", make_subtitle: bool = T
 
                 tts_path = os.path.join(tmpdir, f"seg_{i:04d}.mp3")
                 try:
-                    tts_segment_sync(text, tts_path, voice)
+                    tts_segment_sync(text, tts_path, voice_key)
                 except Exception as e:
                     print(f"[TTS失敗 seg {i}] {e}")
                     continue
