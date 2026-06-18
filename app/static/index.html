@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>英語→日本語 自動吹き替えシステム</title>
+<style>
+  :root {
+    --primary: #2563eb;
+    --primary-dark: #1d4ed8;
+    --success: #16a34a;
+    --error: #dc2626;
+    --warn: #d97706;
+    --bg: #f8fafc;
+    --card: #ffffff;
+    --border: #e2e8f0;
+    --text: #1e293b;
+    --muted: #64748b;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', 'Hiragino Sans', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+  header { background: var(--primary); color: #fff; padding: 1rem 1.5rem; display: flex; align-items: center; gap: .75rem; }
+  header h1 { font-size: 1.25rem; font-weight: 700; }
+  header small { opacity: .8; font-size: .85rem; }
+  main { max-width: 760px; margin: 2rem auto; padding: 0 1rem; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 1.5rem; margin-bottom: 1.5rem; }
+  .card h2 { font-size: 1rem; font-weight: 600; margin-bottom: 1rem; color: var(--primary); }
+  label { display: block; font-size: .875rem; font-weight: 500; margin-bottom: .4rem; color: var(--muted); }
+  input[type="file"], input[type="text"], select {
+    width: 100%; padding: .6rem .8rem; border: 1px solid var(--border); border-radius: 8px;
+    font-size: .9rem; margin-bottom: 1rem; background: #fff; color: var(--text);
+  }
+  input[type="file"] { cursor: pointer; }
+  .row { display: flex; gap: 1rem; }
+  .row > * { flex: 1; }
+  .tabs { display: flex; border-bottom: 2px solid var(--border); margin-bottom: 1.25rem; }
+  .tab { padding: .5rem 1rem; cursor: pointer; font-size: .9rem; color: var(--muted); border-bottom: 3px solid transparent; margin-bottom: -2px; }
+  .tab.active { color: var(--primary); border-color: var(--primary); font-weight: 600; }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+  button {
+    background: var(--primary); color: #fff; border: none; border-radius: 8px;
+    padding: .65rem 1.4rem; font-size: .95rem; font-weight: 600; cursor: pointer;
+    transition: background .15s;
+  }
+  button:hover { background: var(--primary-dark); }
+  button:disabled { background: #94a3b8; cursor: not-allowed; }
+  .btn-success { background: var(--success); }
+  .btn-success:hover { background: #15803d; }
+  #drop-zone {
+    border: 2px dashed var(--border); border-radius: 10px; padding: 2.5rem;
+    text-align: center; color: var(--muted); cursor: pointer; transition: border-color .2s, background .2s;
+    margin-bottom: 1rem;
+  }
+  #drop-zone.dragover { border-color: var(--primary); background: #eff6ff; }
+  #drop-zone .icon { font-size: 2.5rem; margin-bottom: .5rem; }
+  #file-name { font-size: .85rem; color: var(--primary); font-weight: 500; min-height: 1.2em; }
+  .progress-wrap { background: #e2e8f0; border-radius: 99px; height: 10px; margin: .75rem 0; overflow: hidden; }
+  .progress-bar { height: 100%; background: var(--primary); border-radius: 99px; transition: width .4s; width: 0%; }
+  #status-msg { font-size: .9rem; color: var(--muted); min-height: 1.2em; }
+  #status-msg.error { color: var(--error); }
+  #status-msg.done { color: var(--success); font-weight: 600; }
+  .actions { display: flex; gap: .75rem; flex-wrap: wrap; margin-top: 1rem; }
+  .actions a, .actions button { text-decoration: none; }
+  .chip { display: inline-block; background: #eff6ff; color: var(--primary); border-radius: 99px; padding: .2rem .75rem; font-size: .8rem; font-weight: 600; }
+  .info { background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: .85rem 1rem; font-size: .875rem; color: #166534; margin-bottom: 1rem; }
+</style>
+</head>
+<body>
+<header>
+  <div>🎙️</div>
+  <div>
+    <h1>英語→日本語 自動吹き替えシステム</h1>
+    <small>Whisper 文字起こし + 翻訳 + 日本語 TTS</small>
+  </div>
+</header>
+
+<main>
+  <!-- アップロードカード -->
+  <div class="card">
+    <h2>① ファイルをアップロード / URL を入力</h2>
+    <div class="tabs">
+      <div class="tab active" data-tab="file">ファイル</div>
+      <div class="tab" data-tab="url">URL（YouTube等）</div>
+    </div>
+
+    <!-- ファイルタブ -->
+    <div class="tab-panel active" id="tab-file">
+      <div id="drop-zone">
+        <div class="icon">📁</div>
+        <p>動画・音声ファイルをドロップ<br><small>または クリックして選択</small></p>
+        <div id="file-name"></div>
+      </div>
+      <input type="file" id="file-input" accept="video/*,audio/*" style="display:none">
+    </div>
+
+    <!-- URLタブ -->
+    <div class="tab-panel" id="tab-url">
+      <div class="info">⚠️ yt-dlp が必要です。setup.sh でインストール済みの場合に使用できます。</div>
+      <label>動画 URL（YouTube, Vimeo など）</label>
+      <input type="text" id="url-input" placeholder="https://www.youtube.com/watch?v=...">
+    </div>
+
+    <div class="row">
+      <div>
+        <label>Whisper モデル</label>
+        <select id="model-select">
+          <option value="tiny">tiny（高速・低精度）</option>
+          <option value="base">base（高速・標準）</option>
+          <option value="small">small（バランス）</option>
+          <option value="medium" selected>medium（推奨）</option>
+          <option value="large-v3">large-v3（高精度・低速）</option>
+        </select>
+      </div>
+    </div>
+
+    <button id="upload-btn">アップロード &amp; 文字起こし開始</button>
+  </div>
+
+  <!-- 進捗カード -->
+  <div class="card" id="progress-card" style="display:none">
+    <h2>② 処理状況</h2>
+    <div class="progress-wrap"><div class="progress-bar" id="progress-bar"></div></div>
+    <div id="status-msg">待機中...</div>
+    <div id="job-badge" style="margin-top:.5rem"></div>
+
+    <div class="actions" id="action-buttons" style="display:none">
+      <button id="edit-btn" onclick="">📝 翻訳結果を確認・編集</button>
+      <button id="run-btn" class="btn-success" style="display:none">▶ 日本語音声を合成して動画を生成</button>
+    </div>
+
+    <!-- 声優選択（run前に表示） -->
+    <div id="voice-row" style="display:none; margin-top:1rem;">
+      <label>声優（日本語 TTS）</label>
+      <select id="voice-select">
+        <option value="female">女性（Nanami）</option>
+        <option value="male">男性（Keita）</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- 完成カード -->
+  <div class="card" id="done-card" style="display:none">
+    <h2>③ ダウンロード</h2>
+    <div class="actions">
+      <a id="dl-video-btn" href="#" download>
+        <button class="btn-success">🎬 日本語吹き替え動画</button>
+      </a>
+      <a id="dl-audio-btn" href="#" download>
+        <button>🔊 日本語音声ファイル</button>
+      </a>
+      <a id="dl-sub-btn" href="#" download>
+        <button>📄 字幕ファイル（SRT）</button>
+      </a>
+    </div>
+  </div>
+</main>
+
+<script>
+  let currentJobId = null;
+  let pollTimer    = null;
+
+  // タブ切り替え
+  document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+      tab.classList.add('active');
+      document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+    });
+  });
+
+  // ドロップゾーン
+  const dropZone = document.getElementById('drop-zone');
+  const fileInput = document.getElementById('file-input');
+  let selectedFile = null;
+
+  dropZone.addEventListener('click', () => fileInput.click());
+  dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+  dropZone.addEventListener('drop', e => {
+    e.preventDefault();
+    dropZone.classList.remove('dragover');
+    selectedFile = e.dataTransfer.files[0];
+    document.getElementById('file-name').textContent = selectedFile?.name || '';
+  });
+  fileInput.addEventListener('change', () => {
+    selectedFile = fileInput.files[0];
+    document.getElementById('file-name').textContent = selectedFile?.name || '';
+  });
+
+  // アップロード
+  document.getElementById('upload-btn').addEventListener('click', async () => {
+    const activeTab = document.querySelector('.tab.active').dataset.tab;
+    const model = document.getElementById('model-select').value;
+
+    let res;
+    if (activeTab === 'file') {
+      if (!selectedFile) { alert('ファイルを選択してください'); return; }
+      const fd = new FormData();
+      fd.append('file', selectedFile);
+      fd.append('model', model);
+      res = await fetch('/upload', { method: 'POST', body: fd });
+    } else {
+      const url = document.getElementById('url-input').value.trim();
+      if (!url) { alert('URLを入力してください'); return; }
+      const fd = new FormData();
+      fd.append('url', url);
+      fd.append('model', model);
+      res = await fetch('/download_url', { method: 'POST', body: fd });
+    }
+
+    if (!res.ok) { alert('アップロード失敗'); return; }
+    const { job_id } = await res.json();
+    currentJobId = job_id;
+
+    document.getElementById('progress-card').style.display = '';
+    document.getElementById('done-card').style.display = 'none';
+    document.getElementById('job-badge').innerHTML = `<span class="chip">Job ID: ${job_id}</span>`;
+    startPolling();
+  });
+
+  function startPolling() {
+    clearInterval(pollTimer);
+    pollTimer = setInterval(pollStatus, 2000);
+  }
+
+  async function pollStatus() {
+    if (!currentJobId) return;
+    const res = await fetch(`/jobs/${currentJobId}/status`);
+    if (!res.ok) return;
+    const data = await res.json();
+
+    document.getElementById('progress-bar').style.width = data.progress + '%';
+    const msg = document.getElementById('status-msg');
+    msg.textContent = data.message;
+    msg.className = data.status === 'error' ? 'error' : data.status === 'done' ? 'done' : '';
+
+    const actions = document.getElementById('action-buttons');
+    const editBtn = document.getElementById('edit-btn');
+    const runBtn  = document.getElementById('run-btn');
+    const voiceRow = document.getElementById('voice-row');
+
+    if (data.status === 'ready_to_edit') {
+      actions.style.display = '';
+      editBtn.style.display = '';
+      runBtn.style.display  = '';
+      voiceRow.style.display = '';
+      editBtn.onclick = () => window.open(`/edit?job=${currentJobId}`, '_blank');
+    }
+
+    if (data.status === 'done') {
+      clearInterval(pollTimer);
+      document.getElementById('done-card').style.display = '';
+      const base = `/jobs/${currentJobId}`;
+      document.getElementById('dl-video-btn').href = base + '/download';
+      document.getElementById('dl-audio-btn').href = base + '/audio';
+      document.getElementById('dl-sub-btn').href   = base + '/subtitle';
+    }
+
+    if (data.status === 'error') {
+      clearInterval(pollTimer);
+    }
+  }
+
+  // 吹き替え実行ボタン
+  document.getElementById('run-btn')?.addEventListener('click', async () => {
+    if (!currentJobId) return;
+    const voice = document.getElementById('voice-select').value;
+    const fd = new FormData();
+    fd.append('voice', voice);
+    fd.append('subtitle', 'true');
+    await fetch(`/jobs/${currentJobId}/run`, { method: 'POST', body: fd });
+    startPolling();
+  });
+</script>
+</body>
+</html>
