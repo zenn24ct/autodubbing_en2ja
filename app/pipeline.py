@@ -2,11 +2,11 @@
 処理パイプライン — 英語→日本語 自動吹き替え
 
 STEP 1  : 音声抽出 + Whisper 英語文字起こし → segments_en.json
-STEP 1.5: (任意) Claude による英語テキスト整形
 STEP 2  : 英語→日本語 翻訳 → segments_ja.json
-STEP 3  : edge-tts で日本語音声生成 + 話速調整
-STEP 4  : 日本語音声トラック合成 → 動画に差し替え
-STEP 5  : (任意) SRT 字幕ファイル生成
+STEP 3  : TTS で日本語音声生成（edge-tts または VOICEVOX）
+STEP 4  : スマート配置（前の音声終端を追跡して衝突を防ぐ）
+STEP 5  : 日本語音声トラック合成 → 動画に差し替え
+STEP 6  : (任意) SRT 字幕ファイル生成
 """
 
 import asyncio
@@ -34,13 +34,17 @@ EDGE_VOICES = {
     "male":   "ja-JP-KeitaNeural",
 }
 
-# VOICEVOX スピーカーID
-# https://voicevox.hiroshiba.jp/ でキャラ一覧確認
+# VOICEVOX スピーカーID（VOICEVOX起動後 http://localhost:50021/speakers で全一覧確認可）
 VOICEVOX_SPEAKERS = {
-    "female": 3,   # ずんだもん（ノーマル）
-    "male":   2,   # 四国めたん（ノーマル）
+    "female":  3,   # ずんだもん（ノーマル）
+    "male":    11,  # 玄野武宏（ノーマル）
+    "female2": 8,   # 春日部つむぎ（ノーマル）
+    "male2":   2,   # 四国めたん（ノーマル）
 }
 VOICEVOX_URL = os.environ.get("VOICEVOX_URL", "http://localhost:50021")
+
+# 音声衝突防止: 前のセグメント音声終端から最低これだけ空ける（ミリ秒）
+MIN_GAP_MS = int(os.environ.get("MIN_GAP_MS", "150"))
 
 
 # ── ステータス管理 ────────────────────────────────────────────────────
@@ -426,16 +430,17 @@ def run_pipeline(job_id: str, voice_key: str = "female", make_subtitle: bool = T
         update_status(job_id, "processing", 5, f"日本語音声を生成中（{backend_label} / {voice_key}）...")
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            track = AudioSegment.silent(duration=int(total_duration * 1000) + 500)
+            # 出力トラックは動画より少し長めに確保
+            track = AudioSegment.silent(duration=int(total_duration * 1000) + 3000)
+
+            last_end_ms = 0  # 前セグメントの音声終端（衝突防止用）
 
             for i, seg in enumerate(ja_segments):
                 text = seg.get("text", "").strip()
                 if not text:
                     continue
 
-                start_ms = int(seg["start"] * 1000)
-                end_ms   = int(seg["end"]   * 1000)
-                seg_dur  = end_ms - start_ms
+                seg_start_ms = int(seg["start"] * 1000)
 
                 tts_path = os.path.join(tmpdir, f"seg_{i:04d}.mp3")
                 try:
@@ -446,11 +451,18 @@ def run_pipeline(job_id: str, voice_key: str = "female", make_subtitle: bool = T
 
                 tts_audio = AudioSegment.from_mp3(tts_path)
 
-                # 元の尺に収まらない場合は速度調整
-                if len(tts_audio) > seg_dur * 1.05 and seg_dur > 200:
-                    tts_audio = adjust_speed(tts_audio, seg_dur)
+                # ── スマート配置 ────────────────────────────────────────
+                # 原則: 元の開始時刻に配置
+                # 例外: 前の音声がまだ終わっていない場合は、終端+間隔の後に配置
+                # → 音声同士の衝突を根本的に防ぐ
+                if seg_start_ms >= last_end_ms + MIN_GAP_MS:
+                    actual_start_ms = seg_start_ms  # 元の位置に配置できる
+                else:
+                    actual_start_ms = last_end_ms + MIN_GAP_MS  # 後ろにずらす
+                    print(f"[seg {i}] 衝突回避: {seg_start_ms}ms → {actual_start_ms}ms にずらし")
 
-                track = track.overlay(tts_audio, position=start_ms)
+                track = track.overlay(tts_audio, position=actual_start_ms)
+                last_end_ms = actual_start_ms + len(tts_audio)
 
                 update_status(
                     job_id, "processing",

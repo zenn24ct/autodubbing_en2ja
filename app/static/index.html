@@ -133,9 +133,20 @@
     <div id="voice-row" style="display:none; margin-top:1rem;">
       <label>声優（日本語 TTS）</label>
       <select id="voice-select">
-        <option value="female">女性（Nanami）</option>
-        <option value="male">男性（Keita）</option>
+        <optgroup label="edge-tts（ネット必要）">
+          <option value="female">女性 - Nanami（edge-tts）</option>
+          <option value="male">男性 - Keita（edge-tts）</option>
+        </optgroup>
+        <optgroup label="VOICEVOX（要起動）">
+          <option value="female">ずんだもん ノーマル（VOICEVOX）</option>
+          <option value="male">玄野武宏 ノーマル（VOICEVOX）</option>
+          <option value="female2">春日部つむぎ ノーマル（VOICEVOX）</option>
+          <option value="male2">四国めたん ノーマル（VOICEVOX）</option>
+        </optgroup>
       </select>
+      <small style="color:#64748b; font-size:.8rem;">
+        VOICEVOXを使う場合は先に <code>bash start_voicevox.sh</code> で起動してください
+      </small>
     </div>
   </div>
 
