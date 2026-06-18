@@ -205,7 +205,7 @@ def translate_text_claude(text: str, client) -> str:
 
 def translate_segments(job_id: str, segments: list[dict]) -> list[dict]:
     """全セグメントを翻訳して日本語セグメントリストを返す。"""
-    backend = os.environ.get("TRANSLATION_BACKEND", "claude").lower()
+    backend = os.environ.get("TRANSLATION_BACKEND", "google").lower()
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
 
     use_claude = backend == "claude" and bool(api_key)
