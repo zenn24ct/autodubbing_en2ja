@@ -337,7 +337,7 @@ def tts_segment_sync(text: str, output_path: str, voice_key: str) -> None:
 # ── 音声速度調整 ──────────────────────────────────────────────────────
 # 方針: 最大1.4倍速までしか圧縮しない。それ以上伸びる場合はそのまま流す
 # （無理に圧縮するより、少し重なる方が自然に聞こえる）
-_MAX_SPEED = 1.4
+_MAX_SPEED = 2.0
 
 
 def _build_atempo(speed: float) -> str:
@@ -475,7 +475,7 @@ def run_pipeline(job_id: str, voice_key: str = "female", make_subtitle: bool = T
                 # Google翻訳の場合: 尺超えが起きやすいので1.35倍まで圧縮
                 use_claude = os.environ.get("TRANSLATION_BACKEND", "google") == "claude" \
                              and os.environ.get("ANTHROPIC_API_KEY", "")
-                max_speed  = 1.2 if use_claude else 1.35
+                max_speed  = 2.0
 
                 tts_ms = len(tts_audio)
                 if seg_dur > 0 and tts_ms > seg_dur:
